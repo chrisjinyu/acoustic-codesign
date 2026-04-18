@@ -5,8 +5,7 @@ actuator placement, and modal feedback gains to match a target frequency
 response. Course project for 18-848 *Computational Design of Cyber-Physical
 Systems*, Spring 2026.
 
-<!-- Replace YOURUSER with your GitHub handle after pushing. -->
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/YOURUSER/acoustic-codesign/blob/main/demo.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/chrisjinyu/acoustic-codesign/blob/main/demo.ipynb)
 
 ## Problem
 
