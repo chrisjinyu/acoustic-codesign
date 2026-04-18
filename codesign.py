@@ -121,19 +121,55 @@ L_LAP = _laplacian_matrix()  # (Nx*Ny, Nx*Ny), constant in c
 
 
 def assemble_system(c: jnp.ndarray):
-    """Return (K, M_mat) for the Kirchhoff plate generalized eigenproblem."""
     h = thickness(c)
     D = bending_stiffness(h)
     D_flat = D.flatten()
     
-    # FIX: Multiply by the differential volume element (DX * DY) to properly integrate
+    # Added (DX * DY) integration term
     K = (L_LAP * D_flat[None, :]) @ L_LAP * (DX * DY)
-    K = 0.5 * (K + K.T)  # numerical symmetrization
+    K = 0.5 * (K + K.T)
     
+    # Added (DX * DY) integration term
     mass = cfg.rho * h.flatten() * DX * DY
     M_mat = jnp.diag(mass)
     return K, M_mat
 
+# CUSTOM VJP
+@jax.custom_vjp
+def safe_eigh(A):
+    # Forward pass: execute standard dense solver
+    return jnp.linalg.eigh(A)
+
+def safe_eigh_fwd(A):
+    w, v = safe_eigh(A)
+    return (w, v), (w, v)
+
+def safe_eigh_bwd(res, g):
+    w, v = res
+    g_w, g_v = g
+    
+    # Project the eigenvector gradients
+    vt_gv = jnp.matmul(v.T, g_v)
+    
+    # Compute differences: lambda_i - lambda_j
+    diffs = w[None, :] - w[:, None]
+    
+    # SAFE INVERSE: If the eigenvalues are identical or clustered within 1e-8,
+    # force the F matrix to 0.0 to safely consume the 0.0 gradient from dV,
+    # preventing the NaN * 0 singularity.
+    mask = jnp.abs(diffs) < 1e-8
+    safe_diffs = jnp.where(mask, 1.0, diffs)
+    F = jnp.where(mask, 0.0, 1.0 / safe_diffs)
+    
+    # Reconstruct the symmetric matrix derivative
+    mid = jnp.diag(g_w) + F * vt_gv
+    mid = 0.5 * (mid + mid.T) 
+    dA = jnp.matmul(v, jnp.matmul(mid, v.T))
+    
+    return (dA,)
+
+# Bind the custom backward pass to the safe_eigh function
+safe_eigh.defvjp(safe_eigh_fwd, safe_eigh_bwd)
 
 def solve_modes(c: jnp.ndarray):
     """First n_modes natural frequencies (rad/s) and M-orthonormal mode shapes.
@@ -148,12 +184,21 @@ def solve_modes(c: jnp.ndarray):
     m_diag = jnp.diag(M_mat)
     sqrt_m_inv = 1.0 / jnp.sqrt(m_diag + 1e-30)
     K_tilde = K * sqrt_m_inv[:, None] * sqrt_m_inv[None, :]
-    K_tilde = 0.5 * (K_tilde + K_tilde.T)              # numerical symmetrization
-    reg = 1e-10 * jnp.eye(K_tilde.shape[0])
-    w, V_tilde = jeigh(K_tilde + reg)
+    
+    # Symmetrize to ensure numerical Hermiticity before the solve
+    K_tilde = 0.5 * (K_tilde + K_tilde.T)
+    
+    # Minor regularization to prevent absolute zero eigenvalues
+    reg = 1e-8 * jnp.eye(K_tilde.shape[0])
+    
+    # Forward pass executes natively; Backward pass is intercepted 
+    # by our VJP to nullify degenerate mode gradients
+    w, V_tilde = safe_eigh(K_tilde + reg)
+    
+    # Slice the lowest n_modes out of the full spectrum
     w = jnp.clip(w[: cfg.n_modes], min=0.0)
     omega = jnp.sqrt(w + 1e-12)
-    Phi = sqrt_m_inv[:, None] * V_tilde[:, : cfg.n_modes]  # back-transform: x = D^-1 y
+    Phi = sqrt_m_inv[:, None] * V_tilde[:, : cfg.n_modes] 
     return omega, Phi
 
 
@@ -202,12 +247,17 @@ def modal_lqr_gains(omega: jnp.ndarray,
     control signal is  u = -K_gain @ x  with x stacked as
         [q_0, qdot_0, q_1, qdot_1, ..., q_{n-1}, qdot_{n-1}].
     """
-    b_norm_sq = jnp.sum(B**2, axis=1) + 1e-12          # (n_modes,)
+    b_norm_sq = jnp.sum(B**2, axis=1) + 1e-12
     gamma = b_norm_sq / r_weight
-    p12 = q_weight / (omega**2 + jnp.sqrt(omega**4 + gamma * q_weight))
-    p22 = (2 * p12 + q_weight) / (2 * zeta * omega + jnp.sqrt(4 * zeta**2 * omega**2 + gamma * (2 * p12 + q_weight)))
-    # Per-actuator gains: k_{p,ij} = B_{ij} * p12 / r ; k_{d,ij} = B_{ij} * p22 / r
-    kp = B * (p12 / r_weight)[:, None]    # (n_modes, n_act)
+    
+    # Rationalized forms with 1e-12 inside roots to prevent NaN gradients
+    inner_1 = omega**4 + gamma * q_weight + 1e-12
+    p12 = q_weight / (omega**2 + jnp.sqrt(inner_1))
+    
+    inner_2 = 4 * zeta**2 * omega**2 + gamma * (2 * p12 + q_weight) + 1e-12
+    p22 = (2 * p12 + q_weight) / (2 * zeta * omega + jnp.sqrt(inner_2))
+    
+    kp = B * (p12 / r_weight)[:, None]
     kd = B * (p22 / r_weight)[:, None]
     n = cfg.n_modes
     K_gain = jnp.zeros((cfg.n_actuators, 2 * n))
@@ -232,8 +282,12 @@ def closed_loop(omega: jnp.ndarray,
     idx_d = idx_p + 1
     A = jnp.zeros((2 * n, 2 * n))
     A = A.at[idx_p, idx_d].set(1.0)
+    
+    # FIX: The scaling must happen here. 
+    # If omega is scaled by W_REF, A_cl is strictly bounded.
     A = A.at[idx_d, idx_p].set(-omega**2)
     A = A.at[idx_d, idx_d].set(-2 * zeta * omega)
+    
     B_u = jnp.zeros((2 * n, cfg.n_actuators))
     B_u = B_u.at[idx_d, :].set(B)
     B_d = jnp.zeros((2 * n, 1))
@@ -275,9 +329,13 @@ def loss_fn(params, target_spectrum, target_freqs):
     b_dist = modal_input_matrix(Phi, disturb_pos)[:, 0]          # (n_modes,)
 
     K_gain = modal_lqr_gains(omega, B, q_weight, r_weight)
+    
+    # Assemble the closed loop matrices first
     A_cl, B_d, C_out = closed_loop(omega, B, K_gain, b_dist)
 
+    # Pass the matrices (4 arguments)
     Hmag = frf_magnitude(A_cl, B_d, C_out, target_freqs)
+    
     Hn = Hmag / (jnp.max(Hmag) + 1e-12)
     Tn = target_spectrum / (jnp.max(target_spectrum) + 1e-12)
     spec_loss = jnp.mean((Hn - Tn) ** 2)
@@ -320,9 +378,29 @@ def run(num_steps: int = 400, seed: int = 0, verbose: bool = True):
     history = []
     for step in range(num_steps):
         loss, grads = value_and_grad(params, target, freqs)
+        
+        # --- DIAGNOSTIC INTERCEPTOR ---
+        grad_c, grad_pos, grad_q, grad_r = grads
+        nan_c = jnp.isnan(grad_c).any()
+        nan_pos = jnp.isnan(grad_pos).any()
+        nan_q = jnp.isnan(grad_q).any()
+        nan_r = jnp.isnan(grad_r).any()
+        
+        if jnp.isnan(loss) or any([nan_c, nan_pos, nan_q, nan_r]):
+            print(f"\\n--- FATAL NaN DETECTED AT STEP {step} ---")
+            print(f"Loss is NaN: {jnp.isnan(loss)}")
+            print(f"Thickness (c) grad NaN: {nan_c}")
+            print(f"Positions grad NaN: {nan_pos}")
+            print(f"LQR q-weight grad NaN: {nan_q}")
+            print(f"LQR r-weight grad NaN: {nan_r}")
+            print("---------------------------------------")
+            break
+        # ------------------------------
+
         updates, state = optimizer.update(grads, state, params)
         params = optax.apply_updates(params, updates)
         history.append(float(loss))
+        
         if verbose and step % 25 == 0:
             print(f"step {step:4d}   loss={float(loss):.4e}")
     return params, history, freqs, target
