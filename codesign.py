@@ -25,9 +25,7 @@ import jax.numpy as jnp
 from jax.scipy.linalg import eigh as jeigh
 import optax
 
-# On consumer NVIDIA GPUs (e.g. RTX 4070 Ti Super) fp64 is ~60x slower than fp32.
-# Default to fp32 for speed; flip to True if you see eigendecomp instability
-# or near-degenerate modes giving NaN gradients.
+# 32fp is not viable for this problem as the physics is sensitive to precision
 jax.config.update("jax_enable_x64", True)
 
 
@@ -90,10 +88,10 @@ def thickness(c: jnp.ndarray) -> jnp.ndarray:
     basis = jnp.sin(ms * jnp.pi * X[None, None] / cfg.Lx) \
           * jnp.sin(ns * jnp.pi * Y[None, None] / cfg.Ly)
     perturb = jnp.sum(c[:, :, None, None] * basis, axis=(0, 1))
-    h_raw = cfg.h0 + perturb
-    h_min = 0.3 * cfg.h0
-    # Smooth max(h_raw, h_min) with transition width ~h0
-    h = h_min + cfg.h0 * jax.nn.softplus((h_raw - h_min) / cfg.h0)
+    # Bound h smoothly in [h_min, h_max] via sigmoid.
+    h_min = 0.5 * cfg.h0
+    h_max = 3.0 * cfg.h0           # stay in thin-plate regime
+    h = h_min + (h_max - h_min) * jax.nn.sigmoid(perturb / cfg.h0)
     return h
 
 
@@ -337,8 +335,13 @@ def loss_fn(params, target_spectrum, target_freqs):
     Hmag = frf_magnitude(A_cl, B_d, C_out, target_freqs)
     
     Hn = Hmag / (jnp.max(Hmag) + 1e-12)
+
+    # Suppress off-target peaks
+    off_target_mask = (target_spectrum < 0.05)   # regions where target is near zero
+    suppression_loss = jnp.mean(Hn**2 * off_target_mask)
+    
     Tn = target_spectrum / (jnp.max(target_spectrum) + 1e-12)
-    spec_loss = jnp.mean((Hn - Tn) ** 2)
+    spec_loss = jnp.mean((Hn - Tn)**2) + 0.5 * suppression_loss
 
     # Keep actuators inside the plate with a margin
     pos_pen = jnp.sum(jax.nn.relu(0.05 - positions)
@@ -369,43 +372,34 @@ def run(num_steps: int = 400, seed: int = 0, verbose: bool = True):
     freqs, target = target_spectrum_example()
 
     optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),  # Prevents resonance gradient spikes
+        optax.clip_by_global_norm(1.0),
         optax.adam(1e-2)
     )
     state = optimizer.init(params)
     value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
 
     history = []
+    best_loss = float('inf')
+    best_params = params
+    
     for step in range(num_steps):
         loss, grads = value_and_grad(params, target, freqs)
         
-        # --- DIAGNOSTIC INTERCEPTOR ---
-        grad_c, grad_pos, grad_q, grad_r = grads
-        nan_c = jnp.isnan(grad_c).any()
-        nan_pos = jnp.isnan(grad_pos).any()
-        nan_q = jnp.isnan(grad_q).any()
-        nan_r = jnp.isnan(grad_r).any()
+        # Track best loss and params
+        if loss < best_loss:
+            best_loss = loss
+            best_params = params
         
-        if jnp.isnan(loss) or any([nan_c, nan_pos, nan_q, nan_r]):
-            print(f"\\n--- FATAL NaN DETECTED AT STEP {step} ---")
-            print(f"Loss is NaN: {jnp.isnan(loss)}")
-            print(f"Thickness (c) grad NaN: {nan_c}")
-            print(f"Positions grad NaN: {nan_pos}")
-            print(f"LQR q-weight grad NaN: {nan_q}")
-            print(f"LQR r-weight grad NaN: {nan_r}")
-            print("---------------------------------------")
-            break
-        # ------------------------------
-
         updates, state = optimizer.update(grads, state, params)
         params = optax.apply_updates(params, updates)
         history.append(float(loss))
         
         if verbose and step % 25 == 0:
             print(f"step {step:4d}   loss={float(loss):.4e}")
-    return params, history, freqs, target
+    
+    return best_params, best_loss, history, freqs, target
 
 
 if __name__ == "__main__":
-    final_params, hist, freqs, target = run()
-    print(f"Done. Final loss: {hist[-1]:.4e}")
+    final_params, best_loss, hist, freqs, target = run()
+    print(f"Done. Best loss: {best_loss:.4e}")
