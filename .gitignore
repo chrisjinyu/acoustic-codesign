@@ -37,3 +37,8 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Results
+!fig_frf.pdf
+!fig_multistart.pdf
+!results.json
