@@ -1,0 +1,19 @@
+name: acoustic-codesign
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy>=1.26
+  - matplotlib>=3.8
+  - jupyter>=1.0
+  - ipykernel>=6.25
+  - pip
+  - pip:
+      # --- GPU build (NVIDIA CUDA 12, bundles CUDA + cuDNN runtime) ---
+      # Works on Linux and WSL2-Ubuntu with a recent NVIDIA driver.
+      - jax[cuda12]>=0.4.30
+      # --- CPU-only fallback (comment the line above, uncomment below) ---
+      # - jax>=0.4.30
+      # - jaxlib>=0.4.30
+      - optax>=0.2.0
+      - -e .

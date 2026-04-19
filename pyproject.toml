@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acoustic-codesign"
+version = "0.1.0"
+description = "Co-design of a thin-plate acoustic resonator with piezoelectric feedback control"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Christian Yu" }]
+license = { text = "MIT" }
+dependencies = [
+    "jax>=0.4.30",
+    "jaxlib>=0.4.30",
+    "optax>=0.2.0",
+    "numpy>=1.26",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = ["jupyter>=1.0", "ipykernel>=6.25"]
+
+[tool.setuptools]
+py-modules = ["codesign", "plots", "run_batched"]
