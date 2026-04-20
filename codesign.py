@@ -55,6 +55,22 @@ def modal_lqr_gains(omega: jnp.ndarray,
     K_gain = K_gain.at[:, idx_d].set(kd.T)
     return K_gain
 
+# =============================================================================
+# Actuator Repulsion Incentive
+# =============================================================================
+
+def actuator_repulsion(positions, min_sep: float = 0.15):
+    """Penalize actuator pairs closer than min_sep (in normalized coords).
+    min_sep=0.15 means actuators must be at least 15% of the plate apart.
+    """
+    n = positions.shape[0]
+    total = 0.0
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist_sq = jnp.sum((positions[i] - positions[j])**2)
+            # Soft penalty: large when dist < min_sep, zero when far apart
+            total += jax.nn.relu(min_sep**2 - dist_sq)
+    return total
 
 # =============================================================================
 # Loss
@@ -81,7 +97,8 @@ def loss_fn(params, target_spectrum, target_freqs):
 
     pos_pen = jnp.sum(jax.nn.relu(0.05 - positions)
                       + jax.nn.relu(positions - 0.95))
-    return spec_loss + 10.0 * pos_pen
+    repulsion = actuator_repulsion(positions, min_sep=0.15)
+    return spec_loss + 10.0 * pos_pen + 5.0 * repulsion
 
 
 # =============================================================================
@@ -98,11 +115,14 @@ def init_params_one(key):
     return (c, pos, log_q, log_r)
 
 
-def run(num_steps: int = 400, seed: int = 0, verbose: bool = True):
+def run(num_steps: int = 400,
+        seed: int = 0,
+        lr: float = 5e-3,
+        verbose: bool = True):
     params = init_params_one(jax.random.PRNGKey(seed))
     freqs, target = target_spectrum_fixed()
 
-    optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-2))
+    optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(lr))
     state = optimizer.init(params)
     value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
 

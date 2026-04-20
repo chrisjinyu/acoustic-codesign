@@ -158,7 +158,8 @@ def init_params_one(key, sc: StringConfig = scfg):
 def run(num_steps: int = 400,
         seed: int = 0,
         verbose: bool = True,
-        sc: StringConfig = scfg):
+        sc: StringConfig = scfg,
+        lr: float = 5e-3):
     params = init_params_one(jax.random.PRNGKey(seed), sc)
     freqs = jnp.linspace(cfg.freq_lo, cfg.freq_hi, cfg.n_freqs)
 
@@ -170,7 +171,7 @@ def run(num_steps: int = 400,
     def _loss(params, freqs):
         return loss_fn(params, freqs, sc=sc)
 
-    optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-2))
+    optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(lr))
     state = optimizer.init(params)
     value_and_grad = jax.jit(jax.value_and_grad(_loss))
 
