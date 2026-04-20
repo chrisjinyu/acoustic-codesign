@@ -7,8 +7,7 @@ from __future__ import annotations
 import numpy as np
 import matplotlib.pyplot as plt
 
-import codesign
-from codesign import cfg, X, Y, thickness, solve_modes
+from codesign_core import cfg, X, Y, thickness, solve_modes
 
 
 # -----------------------------------------------------------------------------
@@ -105,22 +104,24 @@ def plot_loss_history(history, ax=None, figsize=(6, 3.5), label=None):
 
 
 # -----------------------------------------------------------------------------
-def dashboard(params, history, freqs, target, baseline_frf=None, optimized_frf=None):
+def dashboard(params, history, freqs, target, baseline_frf=None, optimized_frf=None, string_table_data=None):
     """One-call figure that puts the money shot on a single page.
 
-    Usage:
-        from plots import dashboard
-        fig = dashboard(params, history, freqs, target,
-                        baseline_frf=H_passive, optimized_frf=H_codesigned)
-        fig.savefig('hero.png', dpi=160)
+    Handles both co-design variants:
+      LQR mode:     params = (c, positions, log_q, log_r)
+      Strings mode: params = (c, log_tensions)
     """
-    c, positions, log_q, log_r = params
+    is_lqr = len(params) == 4
+    c = params[0]
+
     fig = plt.figure(figsize=(12, 8), constrained_layout=True)
     gs = fig.add_gridspec(2, 3)
 
+    # Top Left: Thickness
     ax1 = fig.add_subplot(gs[0, 0])
     plot_thickness(c, ax=ax1, title="Optimized thickness")
 
+    # Top Middle/Right: FRF Comparison
     ax2 = fig.add_subplot(gs[0, 1:])
     frfs = {}
     if baseline_frf is not None:
@@ -129,27 +130,65 @@ def dashboard(params, history, freqs, target, baseline_frf=None, optimized_frf=N
         frfs["co-designed"] = optimized_frf
     plot_frf_comparison(freqs, target, frfs, ax=ax2)
 
+    # Bottom Left: Loss History
     ax3 = fig.add_subplot(gs[1, 0])
     plot_loss_history(history, ax=ax3)
 
-    # Inset: actuator positions on plate outline
+    # Bottom Middle/Right: Mode-Specific Data (Actuators OR Table)
     ax4 = fig.add_subplot(gs[1, 1:])
-    ax4.add_patch(plt.Rectangle((0, 0), cfg.Lx * 1e3, cfg.Ly * 1e3,
-                                fill=False, edgecolor="black", lw=1.5))
-    px = np.asarray(positions)[:, 0] * cfg.Lx * 1e3
-    py = np.asarray(positions)[:, 1] * cfg.Ly * 1e3
-    ax4.scatter(px, py, s=120, c="tab:red", edgecolors="black",
-                label="piezo actuators", zorder=3)
-    dx, dy = cfg.disturb_xy
-    ax4.scatter([dx * cfg.Lx * 1e3], [dy * cfg.Ly * 1e3],
-                s=120, c="tab:blue", marker="s", edgecolors="black",
-                label="excitation point", zorder=3)
-    ax4.set_aspect("equal")
-    ax4.set_xlim(-5, cfg.Lx * 1e3 + 5)
-    ax4.set_ylim(-5, cfg.Ly * 1e3 + 5)
-    ax4.set_xlabel("x (mm)")
-    ax4.set_ylabel("y (mm)")
-    ax4.set_title("Actuator layout")
-    ax4.legend(loc="upper right")
-    ax4.grid(alpha=0.3)
+
+    if is_lqr:
+        # --- LQR Mode: Plot Actuators ---
+        ax4.add_patch(plt.Rectangle((0, 0), cfg.Lx * 1e3, cfg.Ly * 1e3,
+                                    fill=False, edgecolor="black", lw=1.5))
+        _, positions, _, _ = params
+        px = np.asarray(positions)[:, 0] * cfg.Lx * 1e3
+        py = np.asarray(positions)[:, 1] * cfg.Ly * 1e3
+        ax4.scatter(px, py, s=120, c="tab:red", edgecolors="black",
+                    label="piezo actuators", zorder=3)
+        ax4.set_title("Actuator layout")
+        
+        dx, dy = cfg.disturb_xy
+        ax4.scatter([dx * cfg.Lx * 1e3], [dy * cfg.Ly * 1e3],
+                    s=120, c="tab:blue", marker="s", edgecolors="black",
+                    label="excitation / bridge", zorder=3)
+        ax4.set_aspect("equal")
+        ax4.set_xlim(-5, cfg.Lx * 1e3 + 5)
+        ax4.set_ylim(-5, cfg.Ly * 1e3 + 5)
+        ax4.set_xlabel("x (mm)")
+        ax4.set_ylabel("y (mm)")
+        ax4.legend(loc="upper right")
+        ax4.grid(alpha=0.3)
+        
+    elif string_table_data is not None:
+        # --- Strings Mode: Plot Tuning Table ---
+        ax4.axis('off')
+        rows, target_pitches, f0_str, tensions_N = string_table_data
+        for i, (ft, fa, T) in enumerate(zip(target_pitches, f0_str, tensions_N)):
+            rows.append((f'String {i+1}', f'{ft:.1f}', f'{fa:.1f}',
+                         f'{100*(fa-ft)/ft:+.2f}%', f'{T:.1f}'))
+        tbl = ax4.table(cellText=rows[1:], colLabels=rows[0],
+                        loc='center', cellLoc='center')
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(11)
+        tbl.scale(1, 1.8)
+        ax4.set_title('Optimized String Tuning')
+        
+    else:
+        # --- Fallback: Passive Plate Only ---
+        ax4.add_patch(plt.Rectangle((0, 0), cfg.Lx * 1e3, cfg.Ly * 1e3,
+                                    fill=False, edgecolor="black", lw=1.5))
+        ax4.set_title("Plate layout (strings mode: no actuators)")
+        dx, dy = cfg.disturb_xy
+        ax4.scatter([dx * cfg.Lx * 1e3], [dy * cfg.Ly * 1e3],
+                    s=120, c="tab:blue", marker="s", edgecolors="black",
+                    label="excitation / bridge", zorder=3)
+        ax4.set_aspect("equal")
+        ax4.set_xlim(-5, cfg.Lx * 1e3 + 5)
+        ax4.set_ylim(-5, cfg.Ly * 1e3 + 5)
+        ax4.set_xlabel("x (mm)")
+        ax4.set_ylabel("y (mm)")
+        ax4.legend(loc="upper right")
+        ax4.grid(alpha=0.3)
+
     return fig

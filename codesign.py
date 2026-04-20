@@ -1,260 +1,50 @@
 """
-Acoustic Co-Design: joint optimization of thin-plate geometry,
-piezoelectric actuator placement, and modal feedback gains.
+codesign.py -- LQR + piezo actuator variant.
 
-18-848 Computational Design of Cyber-Physical Systems
-Christian Yu, Spring 2026.
+Co-design: plate geometry (thickness field) + actuator positions + LQR weights.
+Target: fixed Gaussian spectrum.
 
-Pipeline:
-  thickness field c  -->  K(c), M(c)  -->  (omega_i, phi_i)
-                                              |
-           actuator positions p  -->  B_modal = phi_i(p_j)
-                                              |
-                   LQR weights q, r  -->  K_gain via analytic modal Riccati
-                                              |
-           disturbance at bridge pt  -->  closed-loop FRF |H(jw)|
-                                              |
-                     target spectrum  -->  L(c, p, q, r)
-                                              |
-                                          jax.grad -> Adam
+Re-exports commonly used symbols from codesign_core so existing callers that
+do `import codesign; codesign.solve_modes(...)` continue to work.
 """
 from __future__ import annotations
-from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
-from jax.scipy.linalg import eigh as jeigh
 import optax
 
-# 32fp is not viable for this problem as the physics is sensitive to precision
-jax.config.update("jax_enable_x64", True)
+from codesign_core import (
+    cfg,
+    solve_modes,
+    modal_values_at_points,
+    closed_loop,
+    frf_magnitude,
+    frf_passive,
+    thickness,
+    target_spectrum_fixed,
+)
+
+# Backwards-compat re-export of the fixed target generator
+target_spectrum_example = target_spectrum_fixed
+
+# Alias for the LQR variant; the old code called this "modal_input_matrix"
+modal_input_matrix = modal_values_at_points
 
 
 # =============================================================================
-# Config
-# =============================================================================
-@dataclass(frozen=True)
-class Config:
-    """Scale profiles (swap the defaults below to change):
-
-        Small  (CPU, quick iter):  Nx=25, Ny=20, M=3, n_modes=10, n_actuators=3
-        Medium (single GPU):       Nx=50, Ny=40, M=5, n_modes=20, n_actuators=5   <- default
-        Large  (GPU stress):       Nx=80, Ny=60, M=7, n_modes=30, n_actuators=8
-    """
-    # Plate geometry
-    Lx: float = 0.30
-    Ly: float = 0.20
-    Nx: int = 50          # grid resolution x  (was 25)
-    Ny: int = 40          # grid resolution y  (was 20)
-    h0: float = 3.0e-3
-    # Material (steel by default; swap for spruce if you like)
-    E: float = 2.1e11
-    nu: float = 0.30
-    rho: float = 7800.0
-    # Design space
-    M: int = 5            # thickness basis resolution  (was 3)
-    n_modes: int = 20     # modes to keep  (was 10)
-    n_actuators: int = 5  # was 3
-    # Excitation point (normalized coords) representing string/bridge contact
-    disturb_xy: tuple = (0.20, 0.50)
-    # Frequency grid for the FRF objective
-    n_freqs: int = 300    # was 200
-    freq_lo: float = 40.0
-    freq_hi: float = 1500.0  # was 1200
-    zeta: float = 0.02    # modal damping ratio
-
-
-cfg = Config()
-
-
-# =============================================================================
-# Spatial grid (constant)
-# =============================================================================
-xs = jnp.linspace(0.0, cfg.Lx, cfg.Nx)
-ys = jnp.linspace(0.0, cfg.Ly, cfg.Ny)
-X, Y = jnp.meshgrid(xs, ys, indexing="ij")
-DX = cfg.Lx / (cfg.Nx - 1)
-DY = cfg.Ly / (cfg.Ny - 1)
-
-
-# =============================================================================
-# Geometry: thickness parameterization
-# =============================================================================
-def thickness(c: jnp.ndarray) -> jnp.ndarray:
-    """h(x,y) = h0 + sum_{m,n} c_{mn} sin(m pi x/Lx) sin(n pi y/Ly).
-    A scaled softplus ensures h >= h_min > 0 smoothly.
-    """
-    ms = jnp.arange(1, cfg.M + 1)[:, None, None, None]
-    ns = jnp.arange(1, cfg.M + 1)[None, :, None, None]
-    basis = jnp.sin(ms * jnp.pi * X[None, None] / cfg.Lx) \
-          * jnp.sin(ns * jnp.pi * Y[None, None] / cfg.Ly)
-    perturb = jnp.sum(c[:, :, None, None] * basis, axis=(0, 1))
-    # Bound h smoothly in [h_min, h_max] via sigmoid.
-    h_min = 0.5 * cfg.h0
-    h_max = 3.0 * cfg.h0           # stay in thin-plate regime
-    h = h_min + (h_max - h_min) * jax.nn.sigmoid(perturb / cfg.h0)
-    return h
-
-
-def bending_stiffness(h: jnp.ndarray) -> jnp.ndarray:
-    return cfg.E * h**3 / (12.0 * (1.0 - cfg.nu**2))
-
-
-# =============================================================================
-# Physics: stiffness and mass matrices
-# =============================================================================
-def _laplacian_matrix() -> jnp.ndarray:
-    """5-point Laplacian with zero Dirichlet BCs. Approximates simply-supported
-    edges (exact for w=0; del^2 w = 0 only enforced in the weak limit)."""
-    e_x = jnp.ones(cfg.Nx)
-    Dxx = (jnp.diag(-2 * e_x) + jnp.diag(e_x[:-1], 1) + jnp.diag(e_x[:-1], -1)) / DX**2
-    Ix = jnp.eye(cfg.Nx)
-    e_y = jnp.ones(cfg.Ny)
-    Dyy = (jnp.diag(-2 * e_y) + jnp.diag(e_y[:-1], 1) + jnp.diag(e_y[:-1], -1)) / DY**2
-    Iy = jnp.eye(cfg.Ny)
-    
-    # FIX: Correct Kronecker order for row-major (C-contiguous) flattening
-    return jnp.kron(Dxx, Iy) + jnp.kron(Ix, Dyy)
-
-L_LAP = _laplacian_matrix()  # (Nx*Ny, Nx*Ny), constant in c
-
-
-def assemble_system(c: jnp.ndarray):
-    h = thickness(c)
-    D = bending_stiffness(h)
-    D_flat = D.flatten()
-    
-    # Added (DX * DY) integration term
-    K = (L_LAP * D_flat[None, :]) @ L_LAP * (DX * DY)
-    K = 0.5 * (K + K.T)
-    
-    # Added (DX * DY) integration term
-    mass = cfg.rho * h.flatten() * DX * DY
-    M_mat = jnp.diag(mass)
-    return K, M_mat
-
-# CUSTOM VJP
-@jax.custom_vjp
-def safe_eigh(A):
-    # Forward pass: execute standard dense solver
-    return jnp.linalg.eigh(A)
-
-def safe_eigh_fwd(A):
-    w, v = safe_eigh(A)
-    return (w, v), (w, v)
-
-def safe_eigh_bwd(res, g):
-    w, v = res
-    g_w, g_v = g
-    
-    # Project the eigenvector gradients
-    vt_gv = jnp.matmul(v.T, g_v)
-    
-    # Compute differences: lambda_i - lambda_j
-    diffs = w[None, :] - w[:, None]
-    
-    # SAFE INVERSE: If the eigenvalues are identical or clustered within 1e-8,
-    # force the F matrix to 0.0 to safely consume the 0.0 gradient from dV,
-    # preventing the NaN * 0 singularity.
-    mask = jnp.abs(diffs) < 1e-8
-    safe_diffs = jnp.where(mask, 1.0, diffs)
-    F = jnp.where(mask, 0.0, 1.0 / safe_diffs)
-    
-    # Reconstruct the symmetric matrix derivative
-    mid = jnp.diag(g_w) + F * vt_gv
-    mid = 0.5 * (mid + mid.T) 
-    dA = jnp.matmul(v, jnp.matmul(mid, v.T))
-    
-    return (dA,)
-
-# Bind the custom backward pass to the safe_eigh function
-safe_eigh.defvjp(safe_eigh_fwd, safe_eigh_bwd)
-
-def solve_modes(c: jnp.ndarray):
-    """First n_modes natural frequencies (rad/s) and M-orthonormal mode shapes.
-
-    JAX's `eigh` only implements the standard eigenvalue problem (b=None), so
-    we convert  K x = lambda M x  to standard form using the diagonal structure
-    of M:  let  D = diag(sqrt(m)), then  K_tilde = D^-1 K D^-1  satisfies
-    K_tilde y = lambda y  with  y = D x.  Back-transform: x = D^-1 y.
-    The resulting x_i are automatically M-orthonormal (x_i^T M x_j = delta_ij).
-    """
-    K, M_mat = assemble_system(c)
-    m_diag = jnp.diag(M_mat)
-    sqrt_m_inv = 1.0 / jnp.sqrt(m_diag + 1e-30)
-    K_tilde = K * sqrt_m_inv[:, None] * sqrt_m_inv[None, :]
-    
-    # Symmetrize to ensure numerical Hermiticity before the solve
-    K_tilde = 0.5 * (K_tilde + K_tilde.T)
-    
-    # Minor regularization to prevent absolute zero eigenvalues
-    reg = 1e-8 * jnp.eye(K_tilde.shape[0])
-    
-    # Forward pass executes natively; Backward pass is intercepted 
-    # by our VJP to nullify degenerate mode gradients
-    w, V_tilde = safe_eigh(K_tilde + reg)
-    
-    # Slice the lowest n_modes out of the full spectrum
-    w = jnp.clip(w[: cfg.n_modes], min=0.0)
-    omega = jnp.sqrt(w + 1e-12)
-    Phi = sqrt_m_inv[:, None] * V_tilde[:, : cfg.n_modes] 
-    return omega, Phi
-
-
-# =============================================================================
-# Actuators: modal input matrix via bilinear interpolation
-# =============================================================================
-def _bilinear_sample(field_grid: jnp.ndarray, positions_norm: jnp.ndarray) -> jnp.ndarray:
-    """field_grid: (Nx, Ny, K); positions_norm in [0,1]^2 shape (P, 2).
-    Returns sampled values of shape (P, K)."""
-    x = positions_norm[:, 0] * (cfg.Nx - 1)
-    y = positions_norm[:, 1] * (cfg.Ny - 1)
-    x0 = jnp.clip(jnp.floor(x).astype(jnp.int32), 0, cfg.Nx - 2)
-    y0 = jnp.clip(jnp.floor(y).astype(jnp.int32), 0, cfg.Ny - 2)
-    fx = (x - x0)[:, None]
-    fy = (y - y0)[:, None]
-    f00 = field_grid[x0, y0]
-    f10 = field_grid[x0 + 1, y0]
-    f01 = field_grid[x0, y0 + 1]
-    f11 = field_grid[x0 + 1, y0 + 1]
-    return ((1 - fx) * (1 - fy) * f00
-            + fx * (1 - fy) * f10
-            + (1 - fx) * fy * f01
-            + fx * fy * f11)
-
-
-def modal_input_matrix(Phi: jnp.ndarray, positions: jnp.ndarray) -> jnp.ndarray:
-    """Return B of shape (n_modes, n_actuators), where B[i,j] = phi_i(p_j)."""
-    Phi_grid = Phi.reshape(cfg.Nx, cfg.Ny, cfg.n_modes)
-    vals = _bilinear_sample(Phi_grid, positions)   # (n_act, n_modes)
-    return vals.T                                  # (n_modes, n_act)
-
-
-# =============================================================================
-# Modal LQR: analytic 2x2 Riccati per mode (MIMO with R = r*I)
+# Modal LQR: analytic 2x2 Riccati per mode, MIMO with R = r*I
 # =============================================================================
 def modal_lqr_gains(omega: jnp.ndarray,
                     B: jnp.ndarray,
                     q_weight: jnp.ndarray,
                     r_weight: jnp.ndarray,
                     zeta: float = cfg.zeta) -> jnp.ndarray:
-    """Closed-form LQR for each modal 2x2 subsystem with isotropic R = r*I.
-    Because BB^T collapses to scalar ||B_i||^2 per mode, the Riccati has
-    an analytic solution.
-
-    Returns K_gain of shape (n_actuators, 2*n_modes), arranged so that the
-    control signal is  u = -K_gain @ x  with x stacked as
-        [q_0, qdot_0, q_1, qdot_1, ..., q_{n-1}, qdot_{n-1}].
-    """
+    """Closed-form LQR gains stacked over all modes."""
     b_norm_sq = jnp.sum(B**2, axis=1) + 1e-12
     gamma = b_norm_sq / r_weight
-    
-    # Rationalized forms with 1e-12 inside roots to prevent NaN gradients
     inner_1 = omega**4 + gamma * q_weight + 1e-12
     p12 = q_weight / (omega**2 + jnp.sqrt(inner_1))
-    
     inner_2 = 4 * zeta**2 * omega**2 + gamma * (2 * p12 + q_weight) + 1e-12
     p22 = (2 * p12 + q_weight) / (2 * zeta * omega + jnp.sqrt(inner_2))
-    
     kp = B * (p12 / r_weight)[:, None]
     kd = B * (p22 / r_weight)[:, None]
     n = cfg.n_modes
@@ -265,55 +55,25 @@ def modal_lqr_gains(omega: jnp.ndarray,
     K_gain = K_gain.at[:, idx_d].set(kd.T)
     return K_gain
 
+# =============================================================================
+# Actuator Repulsion Incentive
+# =============================================================================
+
+def actuator_repulsion(positions, min_sep: float = 0.15):
+    """Penalize actuator pairs closer than min_sep (in normalized coords).
+    min_sep=0.15 means actuators must be at least 15% of the plate apart.
+    """
+    n = positions.shape[0]
+    total = 0.0
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist_sq = jnp.sum((positions[i] - positions[j])**2)
+            # Soft penalty: large when dist < min_sep, zero when far apart
+            total += jax.nn.relu(min_sep**2 - dist_sq)
+    return total
 
 # =============================================================================
-# Closed-loop assembly and frequency response
-# =============================================================================
-def closed_loop(omega: jnp.ndarray,
-                B: jnp.ndarray,
-                K_gain: jnp.ndarray,
-                b_dist: jnp.ndarray,
-                zeta: float = cfg.zeta):
-    """Assemble A_cl, B_d, C_out in stacked modal state space."""
-    n = cfg.n_modes
-    idx_p = jnp.arange(n) * 2
-    idx_d = idx_p + 1
-    A = jnp.zeros((2 * n, 2 * n))
-    A = A.at[idx_p, idx_d].set(1.0)
-    
-    # FIX: The scaling must happen here. 
-    # If omega is scaled by W_REF, A_cl is strictly bounded.
-    A = A.at[idx_d, idx_p].set(-omega**2)
-    A = A.at[idx_d, idx_d].set(-2 * zeta * omega)
-    
-    B_u = jnp.zeros((2 * n, cfg.n_actuators))
-    B_u = B_u.at[idx_d, :].set(B)
-    B_d = jnp.zeros((2 * n, 1))
-    B_d = B_d.at[idx_d, 0].set(b_dist)
-    C_out = jnp.zeros((1, 2 * n))
-    C_out = C_out.at[0, idx_d].set(1.0)
-    A_cl = A - B_u @ K_gain
-    return A_cl, B_d, C_out
-
-
-def frf_magnitude(A_cl: jnp.ndarray,
-                  B_d: jnp.ndarray,
-                  C_out: jnp.ndarray,
-                  freqs_hz: jnp.ndarray) -> jnp.ndarray:
-    """|C (jw I - A_cl)^{-1} B_d| at each frequency (Hz)."""
-    omega_rad = 2.0 * jnp.pi * freqs_hz
-    I = jnp.eye(A_cl.shape[0])
-
-    def _one(w):
-        resp = jnp.linalg.solve(1j * w * I - A_cl, B_d[:, 0])
-        # Prevent NaN gradients at anti-resonance zeros
-        return jnp.abs(C_out[0] @ resp + 1e-12 + 1e-12j)
-
-    return jax.vmap(_one)(omega_rad)
-
-
-# =============================================================================
-# Objective
+# Loss
 # =============================================================================
 def loss_fn(params, target_spectrum, target_freqs):
     c, positions, log_q, log_r = params
@@ -321,85 +81,69 @@ def loss_fn(params, target_spectrum, target_freqs):
     r_weight = jnp.exp(log_r)
 
     omega, Phi = solve_modes(c)
-    B = modal_input_matrix(Phi, positions)                       # (n_modes, n_act)
-
+    B = modal_input_matrix(Phi, positions)
     disturb_pos = jnp.array([cfg.disturb_xy])
-    b_dist = modal_input_matrix(Phi, disturb_pos)[:, 0]          # (n_modes,)
+    b_dist = modal_input_matrix(Phi, disturb_pos)[:, 0]
 
     K_gain = modal_lqr_gains(omega, B, q_weight, r_weight)
-    
-    # Assemble the closed loop matrices first
     A_cl, B_d, C_out = closed_loop(omega, B, K_gain, b_dist)
-
-    # Pass the matrices (4 arguments)
     Hmag = frf_magnitude(A_cl, B_d, C_out, target_freqs)
-    
-    Hn = Hmag / (jnp.max(Hmag) + 1e-12)
 
-    # Suppress off-target peaks
-    off_target_mask = (target_spectrum < 0.05)   # regions where target is near zero
+    Hn = Hmag / (jnp.max(Hmag) + 1e-12)
+    off_target_mask = (target_spectrum < 0.05)
     suppression_loss = jnp.mean(Hn**2 * off_target_mask)
-    
     Tn = target_spectrum / (jnp.max(target_spectrum) + 1e-12)
     spec_loss = jnp.mean((Hn - Tn)**2) + 0.5 * suppression_loss
 
-    # Keep actuators inside the plate with a margin
     pos_pen = jnp.sum(jax.nn.relu(0.05 - positions)
                       + jax.nn.relu(positions - 0.95))
-    return spec_loss + 10.0 * pos_pen
+    repulsion = actuator_repulsion(positions, min_sep=0.15)
+    return spec_loss + 10.0 * pos_pen + 5.0 * repulsion
 
 
 # =============================================================================
-# Optimization
+# Init and run
 # =============================================================================
-def target_spectrum_example():
-    freqs = jnp.linspace(cfg.freq_lo, cfg.freq_hi, cfg.n_freqs)
-    centers = jnp.array([120.0, 300.0, 620.0])
-    widths = jnp.array([15.0, 20.0, 30.0])
-    spec = sum(jnp.exp(-((freqs - ci) / wi) ** 2) for ci, wi in zip(centers, widths))
-    return freqs, spec
-
-
-def run(num_steps: int = 400, seed: int = 0, verbose: bool = True):
-    key = jax.random.PRNGKey(seed)
+def init_params_one(key):
+    """Build one initial params pytree from a single PRNG key."""
     k1, k2 = jax.random.split(key)
-    c0 = 1e-4 * jax.random.normal(k1, (cfg.M, cfg.M))
-    pos0 = jnp.clip(0.5 + 0.15 * jax.random.normal(k2, (cfg.n_actuators, 2)), 0.1, 0.9)
-    log_q0 = jnp.log(1.0)
-    log_r0 = jnp.log(1.0)
-    params = (c0, pos0, log_q0, log_r0)
+    c = 1e-4 * jax.random.normal(k1, (cfg.M, cfg.M))
+    pos = jnp.clip(0.5 + 0.15 * jax.random.normal(k2, (cfg.n_actuators, 2)),
+                   0.1, 0.9)
+    log_q = jnp.log(1.0)
+    log_r = jnp.log(1.0)
+    return (c, pos, log_q, log_r)
 
-    freqs, target = target_spectrum_example()
 
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),
-        optax.adam(1e-2)
-    )
+def run(num_steps: int = 400,
+        seed: int = 0,
+        lr: float = 5e-3,
+        verbose: bool = True):
+    params = init_params_one(jax.random.PRNGKey(seed))
+    freqs, target = target_spectrum_fixed()
+
+    optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(lr))
     state = optimizer.init(params)
     value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
 
     history = []
     best_loss = float('inf')
     best_params = params
-    
+
     for step in range(num_steps):
         loss, grads = value_and_grad(params, target, freqs)
-        
-        # Track best loss and params
         if loss < best_loss:
-            best_loss = loss
+            best_loss = float(loss)
             best_params = params
-        
         updates, state = optimizer.update(grads, state, params)
         params = optax.apply_updates(params, updates)
         history.append(float(loss))
-        
         if verbose and step % 25 == 0:
             print(f"step {step:4d}   loss={float(loss):.4e}")
-    
+
     return best_params, best_loss, history, freqs, target
 
 
 if __name__ == "__main__":
-    final_params, best_loss, hist, freqs, target = run()
+    best_params, best_loss, hist, freqs, target = run()
     print(f"Done. Best loss: {best_loss:.4e}")

@@ -1,15 +1,12 @@
 import numpy as np
 from stl import mesh
-import codesign
-from codesign import cfg
+import codesign_core as core
+from codesign_core import cfg
 
-def export_results(npz_file="best_params.npz"):
-    # Load the optimized parameters
-    data = np.load(npz_file)
-    c_opt = data['c']
-    
+def export_geometry(c_opt, suffix):
+    """Helper function to export CSV and STL for a given thickness field."""
     # Calculate thickness field (convert to mm)
-    h_m = np.asarray(codesign.thickness(c_opt))
+    h_m = np.asarray(core.thickness(c_opt))
     h_mm = h_m * 1e3 
     
     xs_mm = np.linspace(0, cfg.Lx * 1e3, cfg.Nx)
@@ -17,13 +14,15 @@ def export_results(npz_file="best_params.npz"):
     X, Y = np.meshgrid(xs_mm, ys_mm, indexing="ij")
     
     # --- LEVEL 1: Export CSV for COMSOL / nTop ---
+    csv_filename = f"thickness_field_{suffix}.csv"
     rows = np.column_stack((X.flatten(), Y.flatten(), h_mm.flatten()))
-    np.savetxt("thickness_field.csv", rows, 
+    np.savetxt(csv_filename, rows, 
                header="x_mm,y_mm,thickness_mm", 
                delimiter=",", comments="")
-    print("Saved thickness_field.csv")
+    print(f"  -> Saved {csv_filename}")
 
     # --- LEVEL 2: Export STL for 3D Printing / CAD ---
+    stl_filename = f"optimized_plate_{suffix}.stl"
     vertices = []
     faces = []
     Nx, Ny = cfg.Nx, cfg.Ny
@@ -57,8 +56,32 @@ def export_results(npz_file="best_params.npz"):
         for j in range(3):
             plate_mesh.vectors[i][j] = vertices[f[j], :]
             
-    plate_mesh.save('optimized_plate.stl')
-    print("Saved optimized_plate.stl")
+    plate_mesh.save(stl_filename)
+    print(f"  -> Saved {stl_filename}\n")
+
+def export_results(npz_file="best_params.npz"):
+    # Load the optimized parameters
+    try:
+        data = np.load(npz_file)
+    except FileNotFoundError:
+        print(f"Error: Could not find {npz_file}. Run your Jupyter notebook first to generate it.")
+        return
+
+    found_any = False
+    
+    # Dynamically determine which mode(s) to load and export
+    if 'c_lqr' in data:
+        print("Processing LQR mode geometry...")
+        export_geometry(data['c_lqr'], "lqr")
+        found_any = True
+        
+    if 'c_str' in data:
+        print("Processing Strings mode geometry...")
+        export_geometry(data['c_str'], "strings")
+        found_any = True
+        
+    if not found_any:
+        print(f"Warning: Neither 'c_lqr' nor 'c_str' found in {npz_file}. Check your save logic.")
 
 if __name__ == "__main__":
     export_results()
