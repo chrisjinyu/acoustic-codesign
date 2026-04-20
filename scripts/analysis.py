@@ -3,33 +3,41 @@ analysis.py  --  regenerate all report figures from saved outputs.
 
 Run after demo.ipynb and run_batched.py have both completed:
 
-    python analysis.py
+    python scripts/analysis.py
 
-Reads:
-    results.json          -- scalar results and metadata from demo.ipynb
-    best_params.npz       -- FRF arrays and histories from demo.ipynb
-    multistart_lqr.npz    -- multi-start trajectories from run_batched.py --mode lqr
-    multistart_strings.npz -- multi-start trajectories from run_batched.py --mode strings
+Reads (from outputs/):
+    results.json               -- scalar results and metadata from demo.ipynb
+    best_params.npz            -- FRF arrays and histories from demo.ipynb
+    multistart_lqr.npz         -- multi-start trajectories from run_batched.py --mode lqr
+    multistart_strings.npz     -- multi-start trajectories from run_batched.py --mode strings
 
-Writes:
-    fig_frf_lqr.pdf       -- LQR FRF comparison (passive vs co-designed)
-    fig_frf_strings.pdf   -- strings FRF comparison (passive vs co-designed)
-    fig_multistart_lqr.pdf    -- multi-start variance, LQR
+Writes (to outputs/):
+    fig_frf_lqr.pdf            -- LQR FRF comparison (passive vs co-designed)
+    fig_frf_strings.pdf        -- strings FRF comparison (passive vs co-designed)
+    fig_multistart_lqr.pdf     -- multi-start variance, LQR
     fig_multistart_strings.pdf -- multi-start variance, strings
-    fig_summary_table.pdf     -- one-page results summary
+    fig_summary_table.pdf      -- one-page results summary
 """
 from __future__ import annotations
 import json
-import os
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from pathlib import Path
+
+# Allow imports of codesign* modules from the repo root regardless of cwd.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+OUTPUTS_DIR = REPO_ROOT / "outputs"
+OUTPUTS_DIR.mkdir(exist_ok=True)
 
 # ── Load demo outputs ────────────────────────────────────────────────────────
-with open("results.json") as f:
+with open(OUTPUTS_DIR / "results.json") as f:
     res = json.load(f)
 
-demo  = np.load("best_params.npz", allow_pickle=True)
+demo  = np.load(OUTPUTS_DIR / "best_params.npz", allow_pickle=True)
 MODE  = res["mode"]
 cfg   = res["config"]
 
@@ -69,7 +77,7 @@ if MODE in ("lqr", "both") and "H_lqr" in demo:
     ax.set_title(f"LQR co-design: {imp_lqr:.1f}% improvement over passive")
     ax.legend(); ax.grid(alpha=0.3)
     fig.tight_layout()
-    fig.savefig("fig_frf_lqr.pdf", dpi=160)
+    fig.savefig(OUTPUTS_DIR / "fig_frf_lqr.pdf", dpi=160)
     print("Saved fig_frf_lqr.pdf")
     plt.show()
 
@@ -107,7 +115,7 @@ if MODE in ("strings", "both") and "H_str" in demo:
     ax.set_title(f"Strings co-design: {imp_str:.1f}% improvement over passive")
     ax.legend(); ax.grid(alpha=0.3)
     fig.tight_layout()
-    fig.savefig("fig_frf_strings.pdf", dpi=160)
+    fig.savefig(OUTPUTS_DIR / "fig_frf_strings.pdf", dpi=160)
     print("Saved fig_frf_strings.pdf")
     plt.show()
 
@@ -115,8 +123,8 @@ if MODE in ("strings", "both") and "H_str" in demo:
 # =============================================================================
 # Figure 3: Multi-start variance -- LQR
 # =============================================================================
-lqr_batch_path = "multistart_lqr.npz"
-if os.path.exists(lqr_batch_path):
+lqr_batch_path = OUTPUTS_DIR / "multistart_lqr.npz"
+if lqr_batch_path.exists():
     b = np.load(lqr_batch_path)
     history_all  = b["history"]      # (steps, seeds)
     best_losses  = b["best_losses"]  # (seeds,)
@@ -137,7 +145,7 @@ if os.path.exists(lqr_batch_path):
     ax.set_title(f"LQR multi-start ({n_seeds} seeds)")
     ax.legend(); ax.grid(alpha=0.3, which="both")
     fig.tight_layout()
-    fig.savefig("fig_multistart_lqr.pdf", dpi=160)
+    fig.savefig(OUTPUTS_DIR / "fig_multistart_lqr.pdf", dpi=160)
     print("Saved fig_multistart_lqr.pdf")
     print(f"  best-loss across seeds: "
           f"min={best_losses.min():.3e}  "
@@ -151,8 +159,8 @@ else:
 # =============================================================================
 # Figure 4: Multi-start variance -- strings
 # =============================================================================
-str_batch_path = "multistart_strings.npz"
-if os.path.exists(str_batch_path):
+str_batch_path = OUTPUTS_DIR / "multistart_strings.npz"
+if str_batch_path.exists():
     b = np.load(str_batch_path)
     history_all  = b["history"]
     best_losses  = b["best_losses"]
@@ -173,7 +181,7 @@ if os.path.exists(str_batch_path):
     ax.set_title(f"Strings multi-start ({n_seeds} seeds)")
     ax.legend(); ax.grid(alpha=0.3, which="both")
     fig.tight_layout()
-    fig.savefig("fig_multistart_strings.pdf", dpi=160)
+    fig.savefig(OUTPUTS_DIR / "fig_multistart_strings.pdf", dpi=160)
     print("Saved fig_multistart_strings.pdf")
     print(f"  best-loss across seeds: "
           f"min={best_losses.min():.3e}  "
@@ -251,7 +259,7 @@ ax.set_title(
     pad=20, fontsize=11,
 )
 fig.tight_layout()
-fig.savefig("fig_summary_table.pdf", dpi=160, bbox_inches="tight")
+fig.savefig(OUTPUTS_DIR / "fig_summary_table.pdf", dpi=160, bbox_inches="tight")
 print("Saved fig_summary_table.pdf")
 plt.show()
 
