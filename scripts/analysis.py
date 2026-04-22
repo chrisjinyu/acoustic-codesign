@@ -5,18 +5,30 @@ Run after demo.ipynb and run_batched.py have both completed:
 
     python scripts/analysis.py
 
+And, if the ablation script has been run:
+
+    python scripts/run_ablations.py
+    python scripts/analysis.py
+
 Reads (from outputs/):
     results.json               -- scalar results and metadata from demo.ipynb
     best_params.npz            -- FRF arrays and histories from demo.ipynb
+                                  (must contain c_passive_lqr; see patch note
+                                   in scripts/run_ablations.py)
     multistart_lqr.npz         -- multi-start trajectories from run_batched.py --mode lqr
     multistart_strings.npz     -- multi-start trajectories from run_batched.py --mode strings
+    ablations_lqr.npz          -- ablation arrays from run_ablations.py (optional)
+    ablations_lqr.json         -- ablation scalars from run_ablations.py (optional)
 
 Writes (to outputs/):
-    fig_frf_lqr.pdf            -- LQR FRF comparison (passive vs co-designed)
-    fig_frf_strings.pdf        -- strings FRF comparison (passive vs co-designed)
-    fig_multistart_lqr.pdf     -- multi-start variance, LQR
-    fig_multistart_strings.pdf -- multi-start variance, strings
-    fig_summary_table.pdf      -- one-page results summary
+    fig_frf_lqr.pdf              -- LQR FRF comparison (passive vs co-designed)
+    fig_frf_strings.pdf          -- strings FRF comparison (passive vs co-designed)
+    fig_multistart_lqr.pdf       -- multi-start variance, LQR
+    fig_multistart_strings.pdf   -- multi-start variance, strings
+    fig_summary_table.pdf        -- one-page results summary
+    fig_geometry_comparison.pdf  -- passive-optimal vs joint thickness fields
+    fig_ablation_ladder.pdf      -- Passive | Fixed-QR | Sequential | Joint loss ladder
+    fig_ablation_frf.pdf         -- FRF overlay for the four designs
 """
 from __future__ import annotations
 import json
@@ -44,6 +56,9 @@ cfg   = res["config"]
 print(f"Mode     : {MODE}")
 print(f"Material : {cfg['material']}  grid {cfg['Nx']}x{cfg['Ny']}  M={cfg['M']}")
 print()
+
+# Strings-mode improvement (may or may not be present, computed lazily below)
+imp_str = None
 
 
 # ── Helper: normalise an FRF array to max=1 ──────────────────────────────────
@@ -73,7 +88,7 @@ if MODE in ("lqr", "both") and "H_lqr" in demo:
     ax.plot(freqs_lqr, norm(H_lqr),      lw=1.8,
             label=f"LQR co-designed  (loss={lqr_loss:.3e})")
     ax.set_xlabel("frequency (Hz)")
-    ax.set_ylabel("|H(jω)|  normalized")
+    ax.set_ylabel("|H(jw)|  normalized")
     ax.set_title(f"LQR co-design: {imp_lqr:.1f}% improvement over passive")
     ax.legend(); ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -86,32 +101,25 @@ if MODE in ("lqr", "both") and "H_lqr" in demo:
 # Figure 2: Strings FRF comparison
 # =============================================================================
 if MODE in ("strings", "both") and "H_str" in demo:
-    freqs_str       = demo["freqs_str"]
-    target_str_nom  = demo["target_str_nominal"]
-    H_pass_str      = demo["H_passive_str"]
-    H_str           = demo["H_str"]
+    freqs_str   = demo["freqs_str"]
+    target_str  = demo["target_str_nominal"]
+    H_pass_str  = demo["H_passive_str"]
+    H_str       = demo["H_str"]
 
-    passive_loss_str = res["passive_str_best_loss"]
-    str_loss         = res["strings_best_loss"]
-    imp_str          = 100 * (passive_loss_str - str_loss) / passive_loss_str
-
-    target_pitches = np.array(res["target_pitches_hz"])
-    actual_pitches = np.array(res["actual_pitches_hz"])
+    passive_loss = res["passive_str_best_loss"]
+    str_loss     = res["strings_best_loss"]
+    imp_str      = 100 * (passive_loss - str_loss) / passive_loss
 
     fig, ax = plt.subplots(figsize=(9, 4))
-    T = norm(target_str_nom)
-    ax.fill_between(freqs_str, 0, T, color="gray", alpha=0.25,
-                    label="target (nominal tensions)")
+    T = norm(target_str)
+    ax.fill_between(freqs_str, 0, T, color="gray", alpha=0.25, label="target")
     ax.plot(freqs_str, T, "k--", lw=1.2, alpha=0.6)
     ax.plot(freqs_str, norm(H_pass_str), lw=1.8,
-            label=f"passive only  (loss={passive_loss_str:.3e})")
+            label=f"passive only  (loss={passive_loss:.3e})")
     ax.plot(freqs_str, norm(H_str),      lw=1.8,
             label=f"strings co-designed  (loss={str_loss:.3e})")
-    # Mark target pitches
-    for ft in target_pitches:
-        ax.axvline(ft, color="red", ls=":", alpha=0.4, lw=1)
     ax.set_xlabel("frequency (Hz)")
-    ax.set_ylabel("|H(jω)|  normalized")
+    ax.set_ylabel("|H(jw)|  normalized")
     ax.set_title(f"Strings co-design: {imp_str:.1f}% improvement over passive")
     ax.legend(); ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -125,20 +133,20 @@ if MODE in ("strings", "both") and "H_str" in demo:
 # =============================================================================
 lqr_batch_path = OUTPUTS_DIR / "multistart_lqr.npz"
 if lqr_batch_path.exists():
-    b = np.load(lqr_batch_path)
-    history_all  = b["history"]      # (steps, seeds)
-    best_losses  = b["best_losses"]  # (seeds,)
-    n_seeds      = history_all.shape[1]
+    b = np.load(lqr_batch_path, allow_pickle=True)
+    history_all = b["history"]                   # (n_steps, n_seeds)
+    best_losses = history_all[-1]                # final-step loss per seed
+    n_seeds = history_all.shape[1]
 
-    steps  = np.arange(history_all.shape[0])
-    mean   = history_all.mean(axis=1)
-    std    = history_all.std(axis=1)
-    best   = history_all.min(axis=1)
+    steps = np.arange(history_all.shape[0])
+    mean = history_all.mean(axis=1)
+    std = history_all.std(axis=1)
+    best = history_all.min(axis=1)
 
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.fill_between(steps, mean - std, mean + std, alpha=0.25,
-                    label="mean ± 1 std")
-    ax.semilogy(steps, mean, lw=2,  label="mean across seeds")
+                    label="mean +/- 1 std")
+    ax.semilogy(steps, mean, lw=2, label="mean across seeds")
     ax.semilogy(steps, best, lw=2, ls="--", label="best-step trajectory")
     ax.set_xlabel("step")
     ax.set_ylabel("loss")
@@ -161,20 +169,20 @@ else:
 # =============================================================================
 str_batch_path = OUTPUTS_DIR / "multistart_strings.npz"
 if str_batch_path.exists():
-    b = np.load(str_batch_path)
-    history_all  = b["history"]
-    best_losses  = b["best_losses"]
-    n_seeds      = history_all.shape[1]
+    b = np.load(lqr_batch_path, allow_pickle=True)
+    history_all = b["history"]                   # (n_steps, n_seeds)
+    best_losses = history_all[-1]                # final-step loss per seed
+    n_seeds = history_all.shape[1]
 
     steps = np.arange(history_all.shape[0])
-    mean  = history_all.mean(axis=1)
-    std   = history_all.std(axis=1)
-    best  = history_all.min(axis=1)
+    mean = history_all.mean(axis=1)
+    std = history_all.std(axis=1)
+    best = history_all.min(axis=1)
 
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.fill_between(steps, mean - std, mean + std, alpha=0.25,
-                    label="mean ± 1 std")
-    ax.semilogy(steps, mean, lw=2,  label="mean across seeds")
+                    label="mean +/- 1 std")
+    ax.semilogy(steps, mean, lw=2, label="mean across seeds")
     ax.semilogy(steps, best, lw=2, ls="--", label="best-step trajectory")
     ax.set_xlabel("step")
     ax.set_ylabel("loss")
@@ -193,9 +201,181 @@ else:
 
 
 # =============================================================================
+# NEW: Geometry comparison -- passive-optimal vs joint-optimal thickness
+# =============================================================================
+# This directly illustrates the co-design coupling: the geometry the optimizer
+# arrives at is different when a controller is available to it.
+# =============================================================================
+def _reconstruct_thickness(c_coef, cfg_dict):
+    """Minimal re-implementation of codesign_core.thickness from raw data.
+
+    Kept self-contained so analysis.py does not need a working JAX install.
+    """
+    c = np.asarray(c_coef)
+    Nx, Ny = cfg_dict["Nx"], cfg_dict["Ny"]
+    Lx, Ly = cfg_dict["Lx"], cfg_dict["Ly"]
+    M = c.shape[0]
+    # Same h0 convention as codesign_core.Config default
+    h0 = 3.0e-3
+    xs = np.linspace(0, Lx, Nx)
+    ys = np.linspace(0, Ly, Ny)
+    XX, YY = np.meshgrid(xs, ys, indexing="ij")
+    perturb = np.zeros_like(XX)
+    for i in range(M):
+        for j in range(M):
+            perturb += c[i, j] * np.sin((i + 1) * np.pi * XX / Lx) \
+                                * np.sin((j + 1) * np.pi * YY / Ly)
+    sig = 1.0 / (1.0 + np.exp(-perturb / h0))
+    h_min, h_max = 0.5 * h0, 3.0 * h0
+    return XX, YY, h_min + (h_max - h_min) * sig
+
+
+if MODE in ("lqr", "both") and "c_lqr" in demo.files:
+    if "c_passive_lqr" not in demo.files:
+        print("Skipping fig_geometry_comparison.pdf: c_passive_lqr not in "
+              "best_params.npz. Add it to save_args in demo.ipynb (one-liner).")
+    else:
+        c_passive = demo["c_passive_lqr"]
+        c_joint = demo["c_lqr"]
+        pos_joint = demo["positions_lqr"]
+
+        XX, YY, h_passive = _reconstruct_thickness(c_passive, cfg)
+        _,  _,  h_joint = _reconstruct_thickness(c_joint, cfg)
+        h_diff = (h_joint - h_passive) * 1e3  # mm
+
+        fig, axes = plt.subplots(1, 3, figsize=(14, 4.2))
+        # Shared color scale for the two thickness panels
+        vmin = min(h_passive.min(), h_joint.min()) * 1e3
+        vmax = max(h_passive.max(), h_joint.max()) * 1e3
+
+        im0 = axes[0].pcolormesh(XX * 1e3, YY * 1e3, h_passive * 1e3,
+                                 cmap="viridis", vmin=vmin, vmax=vmax,
+                                 shading="auto")
+        axes[0].set_title("Passive-optimal  (no controller)")
+        axes[0].set_xlabel("x (mm)"); axes[0].set_ylabel("y (mm)")
+        axes[0].set_aspect("equal")
+        plt.colorbar(im0, ax=axes[0], label="h (mm)")
+
+        im1 = axes[1].pcolormesh(XX * 1e3, YY * 1e3, h_joint * 1e3,
+                                 cmap="viridis", vmin=vmin, vmax=vmax,
+                                 shading="auto")
+        # Overlay actuators
+        px = np.asarray(pos_joint)[:, 0] * cfg["Lx"] * 1e3
+        py = np.asarray(pos_joint)[:, 1] * cfg["Ly"] * 1e3
+        axes[1].scatter(px, py, s=80, marker="^",
+                        facecolors="red", edgecolors="white", linewidths=1.2,
+                        label="actuators")
+        axes[1].set_title("Joint co-design  (with controller)")
+        axes[1].set_xlabel("x (mm)")
+        axes[1].set_aspect("equal")
+        axes[1].legend(loc="upper right", fontsize=9)
+        plt.colorbar(im1, ax=axes[1], label="h (mm)")
+
+        diff_abs_max = np.abs(h_diff).max() + 1e-9
+        im2 = axes[2].pcolormesh(XX * 1e3, YY * 1e3, h_diff,
+                                 cmap="RdBu_r",
+                                 vmin=-diff_abs_max, vmax=diff_abs_max,
+                                 shading="auto")
+        axes[2].set_title("Difference  (joint minus passive)")
+        axes[2].set_xlabel("x (mm)")
+        axes[2].set_aspect("equal")
+        plt.colorbar(im2, ax=axes[2], label="dh (mm)")
+
+        fig.suptitle(
+            "How geometry changes when a controller is available "
+            f"(material={cfg['material']})", fontsize=12
+        )
+        fig.tight_layout()
+        fig.savefig(OUTPUTS_DIR / "fig_geometry_comparison.pdf", dpi=160)
+        print("Saved fig_geometry_comparison.pdf")
+        plt.show()
+
+
+# =============================================================================
+# NEW: Ablation ladder  (Passive | Fixed-QR | Sequential | Joint)
+# =============================================================================
+abl_npz_path = OUTPUTS_DIR / "ablations_lqr.npz"
+abl_json_path = OUTPUTS_DIR / "ablations_lqr.json"
+
+if abl_npz_path.exists() and abl_json_path.exists():
+    abl = np.load(abl_npz_path, allow_pickle=True)
+    with open(abl_json_path) as f:
+        abl_res = json.load(f)
+
+    losses = [abl_res["passive_loss"],
+              abl_res["fixedqr_loss"],
+              abl_res["sequential_loss"],
+              abl_res["joint_loss"]]
+    labels = ["Passive\n(no controller)",
+              "Fixed Q/R\n(c, positions)",
+              "Sequential\n(passive c then controller)",
+              "Joint\n(all four variables)"]
+    colors = ["#999999", "#4c9fcb", "#e29657", "#c6423f"]
+
+    # Improvements vs. passive, annotated under each bar
+    passive_loss = losses[0]
+    pcts = [100.0 * (passive_loss - L) / passive_loss for L in losses]
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    bars = ax.bar(labels, losses, color=colors, edgecolor="black", linewidth=0.6)
+    for bar, L, pct in zip(bars, losses, pcts):
+        ax.text(bar.get_x() + bar.get_width() / 2,
+                bar.get_height() * 1.02,
+                f"{L:.3e}\n({pct:+.1f}%)",
+                ha="center", va="bottom", fontsize=9)
+
+    ax.set_yscale("log")
+    ax.set_ylabel("Final loss  (log scale)")
+    ax.set_title("Co-design validation ladder  "
+                 "(lower = closer to target)")
+    ax.grid(axis="y", which="both", alpha=0.3)
+    # Add headroom for the text annotations
+    ax.set_ylim(top=max(losses) * 3.0)
+    fig.tight_layout()
+    fig.savefig(OUTPUTS_DIR / "fig_ablation_ladder.pdf", dpi=160)
+    print("Saved fig_ablation_ladder.pdf")
+    plt.show()
+
+    # =========================================================================
+    # NEW: FRF overlay for all four designs
+    # =========================================================================
+    freqs_abl = abl["freqs"]
+    target_abl = abl["target"]
+
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    T = norm(target_abl)
+    ax.fill_between(freqs_abl, 0, T, color="gray", alpha=0.25, label="target")
+    ax.plot(freqs_abl, T, "k--", lw=1.2, alpha=0.6)
+
+    curves = [
+        ("Passive",    abl["H_passive"],   "#999999", "-"),
+        ("Fixed Q/R",  abl["H_fixedqr"],   "#4c9fcb", "-"),
+        ("Sequential", abl["H_sequential"], "#e29657", "-"),
+        ("Joint",      abl["H_joint"],     "#c6423f", "-"),
+    ]
+    for lbl, H, color, ls in curves:
+        ax.plot(freqs_abl, norm(H), lw=1.9, ls=ls, color=color, label=lbl)
+
+    ax.set_xlabel("frequency (Hz)")
+    ax.set_ylabel("|H(jw)|  normalized")
+    ax.set_title("FRF across the co-design ladder")
+    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(OUTPUTS_DIR / "fig_ablation_frf.pdf", dpi=160)
+    print("Saved fig_ablation_frf.pdf")
+    plt.show()
+else:
+    print(f"Skipping ablation figures "
+          f"({abl_npz_path.name} and/or {abl_json_path.name} not found; "
+          f"run scripts/run_ablations.py first).")
+    abl_res = None
+
+
+# =============================================================================
 # Figure 5: Summary table (one page, report-ready)
 # =============================================================================
-fig = plt.figure(figsize=(9, 5))
+fig = plt.figure(figsize=(10, 6))
 ax = fig.add_subplot(111)
 ax.axis("off")
 
@@ -208,41 +388,62 @@ if MODE in ("lqr", "both"):
     rows.append(["Co-design best loss",
                  f"{res['lqr_best_loss']:.4e}",
                  f"{res['strings_best_loss']:.4e}" if MODE == "both" else ""])
-    rows.append(["Improvement",
+    rows.append(["Improvement vs passive",
                  f"{res['lqr_improvement_pct']:.1f}%",
-                 f"{imp_str:.1f}%" if MODE == "both" else ""])
+                 f"{imp_str:.1f}%" if (MODE == "both" and imp_str is not None) else ""])
     rows.append(["First 6 modes (Hz)",
                  ", ".join(lqr_modes), ""])
 
 if MODE in ("strings", "both"):
     str_modes = [f"{f:.0f}" for f in res["omega_hz_strings"][:6]]
     if MODE == "both":
-        # patch rows already inserted
         rows[2][2] = f"{res['strings_best_loss']:.4e}"
-        rows[3][2] = f"{imp_str:.1f}%"
+        rows[3][2] = (f"{imp_str:.1f}%" if imp_str is not None
+                      else f"{100*(res['passive_str_best_loss']-res['strings_best_loss'])/res['passive_str_best_loss']:.1f}%")
         rows[4][2] = ", ".join(str_modes)
-        # string tuning rows
         rows.append(["", "", ""])
-        rows.append(["String tuning", "target Hz → actual Hz", "detune"])
+        rows.append(["String tuning", "target Hz -> actual Hz", "detune"])
         for i, (ft, fa) in enumerate(zip(
                 res["target_pitches_hz"], res["actual_pitches_hz"])):
             rows.append([f"  String {i+1}",
-                         f"{ft:.1f} → {fa:.1f} Hz",
+                         f"{ft:.1f} -> {fa:.1f} Hz",
                          f"{100*(fa-ft)/ft:+.2f}%"])
     else:
         rows.append(["Passive best loss (strings)",
                      "", f"{res['passive_str_best_loss']:.4e}"])
         rows.append(["Co-design best loss",
                      "", f"{res['strings_best_loss']:.4e}"])
-        rows.append(["Improvement", "", f"{imp_str:.1f}%"])
+        rows.append(["Improvement",
+                     "", f"{100*(res['passive_str_best_loss']-res['strings_best_loss'])/res['passive_str_best_loss']:.1f}%"])
         rows.append(["First 6 modes (Hz)", "", ", ".join(str_modes)])
         rows.append(["", "", ""])
-        rows.append(["String tuning", "target Hz → actual Hz", "detune"])
+        rows.append(["String tuning", "target Hz -> actual Hz", "detune"])
         for i, (ft, fa) in enumerate(zip(
                 res["target_pitches_hz"], res["actual_pitches_hz"])):
             rows.append([f"  String {i+1}",
-                         f"{ft:.1f} → {fa:.1f} Hz",
+                         f"{ft:.1f} -> {fa:.1f} Hz",
                          f"{100*(fa-ft)/ft:+.2f}%"])
+
+# Append the ablation ladder (LQR only) if available
+if abl_res is not None and MODE in ("lqr", "both"):
+    rows.append(["", "", ""])
+    rows.append(["Co-design ablation ladder", "LQR loss", "vs passive"])
+    rows.append(["  Passive",
+                 f"{abl_res['passive_loss']:.4e}", "(reference)"])
+    rows.append(["  Fixed Q/R",
+                 f"{abl_res['fixedqr_loss']:.4e}",
+                 f"{abl_res['pct_fixedqr_vs_passive']:+.1f}%"])
+    rows.append(["  Sequential",
+                 f"{abl_res['sequential_loss']:.4e}",
+                 f"{abl_res['pct_sequential_vs_passive']:+.1f}%"])
+    rows.append(["  Joint",
+                 f"{abl_res['joint_loss']:.4e}",
+                 f"{abl_res['pct_joint_vs_passive']:+.1f}%"])
+    rows.append(["", "", ""])
+    rows.append(["Value of tuning Q/R (joint vs fixed-QR)", "",
+                 f"{abl_res['pct_joint_vs_fixedqr']:+.1f}%"])
+    rows.append(["Value of joint vs sequential", "",
+                 f"{abl_res['pct_joint_vs_sequential']:+.1f}%"])
 
 tbl = ax.table(
     cellText=rows[1:],
@@ -251,8 +452,8 @@ tbl = ax.table(
     cellLoc="center",
 )
 tbl.auto_set_font_size(False)
-tbl.set_fontsize(10)
-tbl.scale(1, 1.6)
+tbl.set_fontsize(9)
+tbl.scale(1, 1.5)
 ax.set_title(
     f"Results summary  |  material={cfg['material']}  "
     f"grid={cfg['Nx']}x{cfg['Ny']}  M={cfg['M']}",
@@ -268,9 +469,9 @@ plt.show()
 # Console summary
 # =============================================================================
 print()
-print("=" * 55)
+print("=" * 60)
 print("Results summary")
-print("=" * 55)
+print("=" * 60)
 if MODE in ("lqr", "both"):
     print(f"LQR passive best loss  : {res['passive_lqr_best_loss']:.4e}")
     print(f"LQR co-design best     : {res['lqr_best_loss']:.4e}"
@@ -279,6 +480,9 @@ if MODE in ("lqr", "both"):
           f"{[f'{f:.0f}' for f in res['omega_hz_lqr'][:6]]}")
     print()
 if MODE in ("strings", "both"):
+    if imp_str is None:
+        imp_str = 100 * (res["passive_str_best_loss"]
+                         - res["strings_best_loss"]) / res["passive_str_best_loss"]
     print(f"Strings passive best   : {res['passive_str_best_loss']:.4e}")
     print(f"Strings co-design best : {res['strings_best_loss']:.4e}"
           f"  ({imp_str:+.1f}%)")
@@ -290,5 +494,18 @@ if MODE in ("strings", "both"):
             res["target_pitches_hz"],
             res["actual_pitches_hz"],
             res["tensions_N"])):
-        print(f"  String {i+1}: {ft:.1f} → {fa:.1f} Hz "
+        print(f"  String {i+1}: {ft:.1f} -> {fa:.1f} Hz "
               f"({100*(fa-ft)/ft:+.2f}%)  tension {T:.1f} N")
+
+if abl_res is not None:
+    print()
+    print("Co-design ladder:")
+    print(f"  Passive       : {abl_res['passive_loss']:.4e}   (reference)")
+    print(f"  Fixed Q/R     : {abl_res['fixedqr_loss']:.4e}   "
+          f"({abl_res['pct_fixedqr_vs_passive']:+.1f}% vs passive)")
+    print(f"  Sequential    : {abl_res['sequential_loss']:.4e}   "
+          f"({abl_res['pct_sequential_vs_passive']:+.1f}% vs passive)")
+    print(f"  Joint         : {abl_res['joint_loss']:.4e}   "
+          f"({abl_res['pct_joint_vs_passive']:+.1f}% vs passive)")
+    print(f"  joint vs fixed-QR  : {abl_res['pct_joint_vs_fixedqr']:+.1f}%")
+    print(f"  joint vs sequential: {abl_res['pct_joint_vs_sequential']:+.1f}%")

@@ -46,7 +46,7 @@ class Config:
     h0: float = 3.0e-3
 
     # Material ("steel" or "spruce")
-    material: str = "steel"
+    material: str = "spruce"
 
     # Design space
     M: int = 5

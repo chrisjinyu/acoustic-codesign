@@ -32,13 +32,13 @@ design variables.
 
 ---
 
-## The Hero Figure
+## Overview Figures
 
 <p align="center">
-  <img src="outputs/hero.png" alt="Hero figure: target spectrum overlay, thickness field, and actuator layout" width="820"/>
+  <img src="outputs/fig_dashboard_lqr.png" alt="Overview figure: target spectrum overlay, thickness field, and actuator layout" width="820"/>
 </p>
 
-**Figure 1.** The hero figure produced by `demo.ipynb`. Left: frequency response functions (FRF) for
+**Figure 1.** The overview figure produced by `demo.ipynb`. Left: frequency response functions (FRF) for
 the passive baseline (grey), the co-designed closed-loop system (blue), and the target spectrum
 (orange dashes). The co-designed system closely tracks the target across the full frequency band,
 while the passive plate alone cannot reach the target peaks and troughs. Right: optimized thickness
@@ -188,7 +188,6 @@ acoustic-codesign/
     ├── results.json        # Summary metrics from the last notebook run
     ├── best_params.npz     # Optimized parameters from demo.ipynb
     ├── multistart_lqr.npz  # Batched run results (LQR)
-    ├── hero.png            # Overlay figure (tracked in git)
     ├── modes.png           # Mode-shape grid (tracked in git)
     └── fig_*.png / fig_*.pdf  # Analysis figures (tracked in git)
 ```

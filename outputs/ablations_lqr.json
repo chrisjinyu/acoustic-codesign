@@ -1,0 +1,30 @@
+{
+  "seed": 18848,
+  "steps": 600,
+  "lr": 0.005,
+  "target_centers_hz": [
+    280.0,
+    470.0,
+    530.0
+  ],
+  "target_widths_hz": [
+    40.0,
+    20.0,
+    20.0
+  ],
+  "passive_loss": 0.040574710894629606,
+  "fixedqr_loss": 0.03212897539293303,
+  "fixedqr_log_q": 0.0,
+  "fixedqr_log_r": 0.0,
+  "sequential_loss": 0.028862782739770165,
+  "sequential_log_q": 2.9250906620414234,
+  "sequential_log_r": -2.9250906620414234,
+  "joint_loss": 0.015408885299866589,
+  "joint_log_q": 2.9352217907420917,
+  "joint_log_r": -2.9352217907420917,
+  "pct_fixedqr_vs_passive": 20.815269697496323,
+  "pct_sequential_vs_passive": 28.865093297336617,
+  "pct_joint_vs_passive": 62.02342552758378,
+  "pct_joint_vs_sequential": 46.61330669743562,
+  "pct_joint_vs_fixedqr": 52.040533159187305
+}
