@@ -21,14 +21,14 @@ Reads (from outputs/):
     ablations_lqr.json         -- ablation scalars from run_ablations.py (optional)
 
 Writes (to outputs/):
-    fig_frf_lqr.pdf              -- LQR FRF comparison (passive vs co-designed)
-    fig_frf_strings.pdf          -- strings FRF comparison (passive vs co-designed)
-    fig_multistart_lqr.pdf       -- multi-start variance, LQR
-    fig_multistart_strings.pdf   -- multi-start variance, strings
-    fig_summary_table.pdf        -- one-page results summary
-    fig_geometry_comparison.pdf  -- passive-optimal vs joint thickness fields
-    fig_ablation_ladder.pdf      -- Passive | Fixed-QR | Sequential | Joint loss ladder
-    fig_ablation_frf.pdf         -- FRF overlay for the four designs
+    fig_frf_lqr.png              -- LQR FRF comparison (passive vs co-designed)
+    fig_frf_strings.png          -- strings FRF comparison (passive vs co-designed)
+    fig_multistart_lqr.png       -- multi-start variance, LQR
+    fig_multistart_strings.png   -- multi-start variance, strings
+    fig_summary_table.png        -- one-page results summary
+    fig_geometry_comparison.png  -- passive-optimal vs joint thickness fields
+    fig_ablation_ladder.png      -- Passive | Fixed-QR | Sequential | Joint loss ladder
+    fig_ablation_frf.png         -- FRF overlay for the four designs
 """
 from __future__ import annotations
 import json
@@ -92,8 +92,8 @@ if MODE in ("lqr", "both") and "H_lqr" in demo:
     ax.set_title(f"LQR co-design: {imp_lqr:.1f}% improvement over passive")
     ax.legend(); ax.grid(alpha=0.3)
     fig.tight_layout()
-    fig.savefig(OUTPUTS_DIR / "fig_frf_lqr.pdf", dpi=160)
-    print("Saved fig_frf_lqr.pdf")
+    fig.savefig(OUTPUTS_DIR / "fig_frf_lqr.png", dpi=160)
+    print("Saved fig_frf_lqr.png")
     plt.show()
 
 
@@ -123,8 +123,8 @@ if MODE in ("strings", "both") and "H_str" in demo:
     ax.set_title(f"Strings co-design: {imp_str:.1f}% improvement over passive")
     ax.legend(); ax.grid(alpha=0.3)
     fig.tight_layout()
-    fig.savefig(OUTPUTS_DIR / "fig_frf_strings.pdf", dpi=160)
-    print("Saved fig_frf_strings.pdf")
+    fig.savefig(OUTPUTS_DIR / "fig_frf_strings.png", dpi=160)
+    print("Saved fig_frf_strings.png")
     plt.show()
 
 
@@ -153,8 +153,8 @@ if lqr_batch_path.exists():
     ax.set_title(f"LQR multi-start ({n_seeds} seeds)")
     ax.legend(); ax.grid(alpha=0.3, which="both")
     fig.tight_layout()
-    fig.savefig(OUTPUTS_DIR / "fig_multistart_lqr.pdf", dpi=160)
-    print("Saved fig_multistart_lqr.pdf")
+    fig.savefig(OUTPUTS_DIR / "fig_multistart_lqr.png", dpi=160)
+    print("Saved fig_multistart_lqr.png")
     print(f"  best-loss across seeds: "
           f"min={best_losses.min():.3e}  "
           f"mean={best_losses.mean():.3e}  "
@@ -189,8 +189,8 @@ if str_batch_path.exists():
     ax.set_title(f"Strings multi-start ({n_seeds} seeds)")
     ax.legend(); ax.grid(alpha=0.3, which="both")
     fig.tight_layout()
-    fig.savefig(OUTPUTS_DIR / "fig_multistart_strings.pdf", dpi=160)
-    print("Saved fig_multistart_strings.pdf")
+    fig.savefig(OUTPUTS_DIR / "fig_multistart_strings.png", dpi=160)
+    print("Saved fig_multistart_strings.png")
     print(f"  best-loss across seeds: "
           f"min={best_losses.min():.3e}  "
           f"mean={best_losses.mean():.3e}  "
@@ -232,7 +232,7 @@ def _reconstruct_thickness(c_coef, cfg_dict):
 
 if MODE in ("lqr", "both") and "c_lqr" in demo.files:
     if "c_passive_lqr" not in demo.files:
-        print("Skipping fig_geometry_comparison.pdf: c_passive_lqr not in "
+        print("Skipping fig_geometry_comparison.png: c_passive_lqr not in "
               "best_params.npz. Add it to save_args in demo.ipynb (one-liner).")
     else:
         c_passive = demo["c_passive_lqr"]
@@ -286,8 +286,8 @@ if MODE in ("lqr", "both") and "c_lqr" in demo.files:
             f"(material={cfg['material']})", fontsize=12
         )
         fig.tight_layout()
-        fig.savefig(OUTPUTS_DIR / "fig_geometry_comparison.pdf", dpi=160)
-        print("Saved fig_geometry_comparison.pdf")
+        fig.savefig(OUTPUTS_DIR / "fig_geometry_comparison.png", dpi=160)
+        print("Saved fig_geometry_comparison.png")
         plt.show()
 
 
@@ -332,8 +332,8 @@ if abl_npz_path.exists() and abl_json_path.exists():
     # Add headroom for the text annotations
     ax.set_ylim(top=max(losses) * 3.0)
     fig.tight_layout()
-    fig.savefig(OUTPUTS_DIR / "fig_ablation_ladder.pdf", dpi=160)
-    print("Saved fig_ablation_ladder.pdf")
+    fig.savefig(OUTPUTS_DIR / "fig_ablation_ladder.png", dpi=160)
+    print("Saved fig_ablation_ladder.png")
     plt.show()
 
     # =========================================================================
@@ -362,8 +362,8 @@ if abl_npz_path.exists() and abl_json_path.exists():
     ax.legend(loc="upper right", fontsize=9)
     ax.grid(alpha=0.3)
     fig.tight_layout()
-    fig.savefig(OUTPUTS_DIR / "fig_ablation_frf.pdf", dpi=160)
-    print("Saved fig_ablation_frf.pdf")
+    fig.savefig(OUTPUTS_DIR / "fig_ablation_frf.png", dpi=160)
+    print("Saved fig_ablation_frf.png")
     plt.show()
 else:
     print(f"Skipping ablation figures "
@@ -460,8 +460,8 @@ ax.set_title(
     pad=20, fontsize=11,
 )
 fig.tight_layout()
-fig.savefig(OUTPUTS_DIR / "fig_summary_table.pdf", dpi=160, bbox_inches="tight")
-print("Saved fig_summary_table.pdf")
+fig.savefig(OUTPUTS_DIR / "fig_summary_table.png", dpi=160, bbox_inches="tight")
+print("Saved fig_summary_table.png")
 plt.show()
 
 
