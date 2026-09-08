@@ -341,9 +341,9 @@ instrument.
 
 ## Acknowledgements
 
-Built on feedback from the course instructor, particularly the suggestion to use a continuous
+Built on feedback from the CMU's special topics 18848A course instructor Professor Spielberg, particularly the suggestion to use a continuous
 sine-basis parameterization of the thickness field rather than a voxel-level topology
-optimization, and the pointer to address the co-design framing by jointly optimizing the plant
+optimization, and direction to address the co-design framing by jointly optimizing the plant
 and a feedback controller. Related work pointers from the professor's proposal feedback were
 instrumental in contextualizing the method against the existing computational acoustics
 literature.
