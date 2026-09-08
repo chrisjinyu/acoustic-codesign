@@ -1,6 +1,6 @@
 # Acoustic Co-Design: Joint Optimization of Plate Geometry, Actuator Placement, and Modal Feedback
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/YOURUSER/acoustic-codesign/blob/main/demo.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/chrisjinyu/acoustic-codesign/blob/main/demo.ipynb)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![JAX](https://img.shields.io/badge/framework-JAX-orange.svg)](https://github.com/google/jax)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -199,7 +199,7 @@ acoustic-codesign/
 **CPU (plain pip, tested on macOS and Linux):**
 
 ```bash
-git clone https://github.com/YOURUSER/acoustic-codesign.git
+git clone https://github.com/chrisjinyu/acoustic-codesign.git
 cd acoustic-codesign
 pip install -e .
 jupyter notebook demo.ipynb
